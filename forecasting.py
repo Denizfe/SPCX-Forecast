@@ -17,7 +17,43 @@ from prophet.diagnostics import cross_validation, performance_metrics
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_TICKERS = ["SPCX", "SPY", "QQQ", "AAPL", "MSFT", "GOOGL"]
+TICKERS_BIST: list[str] = [
+    "THYAO.IS",  # Türk Hava Yolları
+    "GARAN.IS",  # Garanti BBVA
+    "AKBNK.IS",  # Akbank
+    "ISCTR.IS",  # Türkiye İş Bankası
+    "YKBNK.IS",  # Yapı Kredi
+    "SAHOL.IS",  # Sabancı Holding
+    "KCHOL.IS",  # Koç Holding
+    "ASELS.IS",  # Aselsan
+    "SISE.IS",   # Şişecam
+    "EREGL.IS",  # Ereğli Demir Çelik
+    "TUPRS.IS",  # Tüpraş
+    "BIMAS.IS",  # BİM
+]
+
+TICKERS_US: list[str] = [
+    "SPCX",
+    "SPY",
+    "QQQ",
+    "AAPL",
+    "MSFT",
+    "GOOGL",
+    "AMZN",
+    "TSLA",
+    "NVDA",
+    "META",
+    "NFLX",
+    "JPM",
+]
+
+# Displayed as market groups in the UI; flattened below for validation.
+TICKER_GROUPS: dict[str, list[str]] = {
+    "BIST (Türkiye)": TICKERS_BIST,
+    "ABD (US)": TICKERS_US,
+}
+
+SUPPORTED_TICKERS = TICKERS_BIST + TICKERS_US
 
 DEFAULT_PARAMS: dict[str, Any] = {
     "changepoint_prior_scale": 0.05,
@@ -52,12 +88,35 @@ def validate_ticker(ticker: str) -> str:
     return ticker
 
 
+def currency_symbol(ticker: str) -> str:
+    """BIST tickers (.IS suffix) trade in TRY; everything else here trades in USD."""
+    return "₺" if ticker.upper().strip().endswith(".IS") else "$"
+
+
+def market_of(ticker: str) -> str:
+    """Return the display name of the market group a ticker belongs to."""
+    ticker = ticker.upper().strip()
+    for market, tickers in TICKER_GROUPS.items():
+        if ticker in tickers:
+            return market
+    return ""
+
+
 def _compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     delta = series.diff()
     gain = delta.clip(lower=0).rolling(window=period, min_periods=period).mean()
     loss = (-delta.clip(upper=0)).rolling(window=period, min_periods=period).mean()
     rs = gain / loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
+    # The division above yields NaN whenever loss == 0, which includes two
+    # different cases that need different values:
+    #   - pure uptrend (gain > 0, loss == 0)  -> RSI 100 (maximally overbought)
+    #   - flat price   (gain == 0, loss == 0) -> RSI 50  (neutral, no movement)
+    # A pure downtrend (gain == 0, loss > 0) divides cleanly to rs == 0, giving
+    # RSI 0 already, so it needs no special-casing.
+    rsi = rsi.where(~((loss == 0) & (gain == 0)), 50.0)
+    rsi = rsi.where(~((loss == 0) & (gain > 0)), 100.0)
+    return rsi
 
 
 def _prepare_prophet_df(raw: pd.DataFrame) -> pd.DataFrame:
