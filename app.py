@@ -11,7 +11,8 @@ import streamlit as st
 from forecasting import (
     DataFetchError,
     ModelError,
-    SUPPORTED_TICKERS,
+    TICKER_GROUPS,
+    currency_symbol,
     evaluate,
     fetch_data,
     forecast,
@@ -27,6 +28,24 @@ CACHE_TTL = 3600  # 1 hour
 
 
 st.set_page_config(page_title="SPCX Forecast", page_icon="📈", layout="wide")
+
+# Small CSS assist for mobile: full-width tap targets and columns that stack
+# instead of squeezing on narrow screens, since Streamlit's default column
+# behavior alone can still look cramped on small phones.
+st.markdown(
+    """
+    <style>
+    div.stButton > button { width: 100%; }
+    @media (max-width: 640px) {
+        div[data-testid="column"] {
+            width: 100% !important;
+            flex: 1 1 100% !important;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 st.title("SPCX Forecast App")
 st.caption("Prophet tabanlı günlük hisse fiyat tahmini — eğitim amaçlıdır.")
@@ -48,7 +67,7 @@ def cached_forecast_pipeline(ticker: str, horizon: int) -> tuple[pd.DataFrame, p
     return df, pred, params, metrics, baseline
 
 
-def build_chart(history: pd.DataFrame, prediction: pd.DataFrame, ticker: str) -> go.Figure:
+def build_chart(history: pd.DataFrame, prediction: pd.DataFrame, ticker: str, currency: str) -> go.Figure:
     hist = history.copy()
     hist["ds"] = pd.to_datetime(hist["ds"])
     pred = prediction.copy()
@@ -90,9 +109,10 @@ def build_chart(history: pd.DataFrame, prediction: pd.DataFrame, ticker: str) ->
     fig.update_layout(
         title=f"{ticker} — Geçmiş & Tahmin",
         xaxis_title="Tarih",
-        yaxis_title="Kapanış ($)",
+        yaxis_title=f"Kapanış ({currency})",
         hovermode="x unified",
-        height=520,
+        height=460,
+        margin=dict(l=10, r=10, t=50, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
     return fig
@@ -103,12 +123,18 @@ if "has_run" not in st.session_state:
 
 with st.sidebar:
     st.header("Ayarlar")
-    ticker_input = st.text_input("Sembol", value="SPCX", help="Desteklenen sembollerden biri")
+    market = st.radio("Pazar", options=list(TICKER_GROUPS.keys()), horizontal=True)
+    ticker_input = st.selectbox(
+        "Sembol",
+        options=TICKER_GROUPS[market],
+        help="Desteklenen sembollerden biri. BIST sembolleri TL, ABD sembolleri USD cinsindendir.",
+    )
     horizon = st.slider("Tahmin ufku (iş günü)", min_value=1, max_value=30, value=5)
-    st.markdown("**Desteklenen semboller:**")
-    st.code(", ".join(SUPPORTED_TICKERS))
+    with st.expander("Tüm desteklenen semboller"):
+        for group_name, tickers in TICKER_GROUPS.items():
+            st.markdown(f"**{group_name}:** {', '.join(tickers)}")
 
-run = st.button("Tahmin Oluştur", type="primary")
+run = st.button("Tahmin Oluştur", type="primary", use_container_width=True)
 should_run = run or not st.session_state.has_run
 
 if should_run:
@@ -117,6 +143,8 @@ if should_run:
     except ValueError as exc:
         st.error(str(exc))
         st.stop()
+
+    currency = currency_symbol(ticker)
 
     try:
         df, pred, params, metrics, baseline = cached_forecast_pipeline(ticker, horizon)
@@ -132,11 +160,38 @@ if should_run:
         st.error(f"Beklenmeyen bir hata oluştu: {exc}")
         st.stop()
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Model MAPE", f"{metrics['mape']:.2f}%")
-    col2.metric("Naif MAPE", f"{baseline['mape']:.2f}%")
-    col3.metric("Model RMSE", f"${metrics['rmse']:.2f}")
-    col4.metric("Naif RMSE", f"${baseline['rmse']:.2f}")
+    row1_col1, row1_col2 = st.columns(2)
+    row1_col1.metric(
+        "Model MAPE",
+        f"{metrics['mape']:.2f}%",
+        help="Modelin tahminlerinin gerçek fiyattan ortalama yüzde sapması. Düşük olması daha iyidir.",
+    )
+    row1_col2.metric(
+        "Naif MAPE",
+        f"{baseline['mape']:.2f}%",
+        help="'Yarın = bugünkü kapanış' varsayımına dayanan en basit yöntemin ortalama yüzde hatası.",
+    )
+
+    row2_col1, row2_col2 = st.columns(2)
+    row2_col1.metric(
+        "Model RMSE",
+        f"{currency}{metrics['rmse']:.2f}",
+        help="Hataların karesinin ortalamasının karekökü, fiyat birimindedir. Büyük hataları orantısız şekilde cezalandırır.",
+    )
+    row2_col2.metric(
+        "Naif RMSE",
+        f"{currency}{baseline['rmse']:.2f}",
+        help="Naif (dünkü kapanış = yarın) yöntemin RMSE değeri; model ile karşılaştırma için baz çizgisidir.",
+    )
+
+    with st.expander("📘 Bu metrikler ne anlama geliyor?"):
+        st.markdown(
+            """
+- **MAPE (Mean Absolute Percentage Error):** Tahminlerin gerçek fiyattan ortalama olarak yüzde kaç saptığını gösterir. Örneğin %5 MAPE, tahminlerin gerçek fiyattan ortalama %5 uzaklıkta olduğu anlamına gelir. Düşük MAPE daha isabetli tahmin demektir.
+- **Naif MAPE:** En basit "yarının fiyatı bugünkü kapanışla aynı olacak" varsayımının MAPE'si. Bu, modelin geçmesi gereken bir baz çizgisidir — model bu basit yöntemden daha iyi değilse, modelin kattığı ek bir değer yok demektir.
+- **RMSE (Root Mean Squared Error):** Hataların karesi alınıp ortalaması hesaplandıktan sonra karekökü alınır. Sonuç, fiyatla aynı birimdedir (₺ veya $). Büyük/ani sapmaları küçük hatalara göre daha ağır cezalandırdığı için MAPE'yi tamamlayıcı bir gösterge olarak kullanılır.
+            """
+        )
 
     beats_baseline = metrics["mape"] < baseline["mape"]
     if beats_baseline:
@@ -151,20 +206,20 @@ if should_run:
             "Günlük hisse tahmini doğası gereği zordur; sonuçları dikkatli yorumlayın."
         )
 
-    st.plotly_chart(build_chart(df, pred, ticker), use_container_width=True)
+    st.plotly_chart(build_chart(df, pred, ticker, currency), use_container_width=True)
 
     last_hist = pd.to_datetime(df["ds"]).max()
     future_rows = pred[pd.to_datetime(pred["ds"]) > last_hist][
         ["ds", "yhat", "yhat_lower", "yhat_upper"]
     ].copy()
     future_rows.columns = ["Tarih", "Tahmin", "Alt", "Üst"]
-    future_rows["Tahmin"] = future_rows["Tahmin"].map(lambda x: f"${x:.2f}")
-    future_rows["Alt"] = future_rows["Alt"].map(lambda x: f"${x:.2f}")
-    future_rows["Üst"] = future_rows["Üst"].map(lambda x: f"${x:.2f}")
+    future_rows["Tahmin"] = future_rows["Tahmin"].map(lambda x: f"{currency}{x:.2f}")
+    future_rows["Alt"] = future_rows["Alt"].map(lambda x: f"{currency}{x:.2f}")
+    future_rows["Üst"] = future_rows["Üst"].map(lambda x: f"{currency}{x:.2f}")
     st.subheader("Tahmin tablosu")
     st.dataframe(future_rows, hide_index=True, use_container_width=True)
 
     with st.expander("Model yapılandırması"):
         st.json(params)
 else:
-    st.info("Sembol ve ufku seçip **Tahmin Oluştur** butonuna basın.")
+    st.info("Pazar ve sembol seçip **Tahmin Oluştur** butonuna basın.")
